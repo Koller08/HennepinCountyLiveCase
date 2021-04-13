@@ -1,0 +1,412 @@
+---
+title: "SNAP Penetration Analyses"
+author: "Tzu-Hsuan (Jessica) Lin"
+date: "2020/11/30"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r include=FALSE}
+setwd("D:/UMN/06_6130 Introduction to Business Analytics in R/Hennepin County Live Case")
+```
+
+```{r warning=FALSE, message=FALSE}
+library(tidyverse)
+library(dplyr)
+library(readxl)
+library(tidyr)
+```
+
+
+# General
+## Read in all data
+FFIEC dataset contains 2016-2019 estimations for population and median income per tract.
+Census data is used for ethnicity distribution (which we haven't used for now).
+```{r message=FALSE}
+ffiec <- read_excel('2016 FFIEC Summary Census Demographic Information.xlsx')
+snap <- read_excel('SNAP Summary data for LiveCase fall 2020.xlsx')
+census <- read_csv('2010_Census_Tracts.csv')
+
+```
+
+
+## Reading household size per tract data
+With help from Casey's team, I extracted the size and margin error of household in each tract in 2018.
+```{r message=FALSE, warning=FALSE}
+
+tract <- read_excel("hennepin_county_all_tracts_household_size_us_census_2018 - Copy.xlsx", skip=9)
+
+tract <- tract[3, grepl("Tract", names(tract))]
+tract <- gather(tract)
+tract$key <- gsub(", Hennepin County, Minnesota", "", tract$key)
+tract$key <- gsub("Census Tract ", "", tract$key)
+tract$value <- gsub(",", "", tract$value)
+
+tract$key <- as.numeric(tract$key)
+tract$value <- as.numeric(tract$value)
+
+tract <- tract %>%
+  rename(tract_name = key,
+         household_size = value)
+
+
+# tract household margin
+margin <- read_excel("hennepin_county_all_tracts_household_size_us_census_2018 - Copy.xlsx",
+                    skip=9)
+margin <- margin[3,]
+margin <- gather(margin)
+margin <- margin[grepl("±",margin$value), ]
+
+margin$value <- gsub("±", "", margin$value)
+
+margin$key <- as.numeric(margin$key)
+margin$value <- as.numeric(margin$value)
+
+margin <- margin %>%
+  rename(household_margin = value)
+
+
+tract <- cbind(tract, margin$household_margin)
+tract <- tract %>%
+  rename(household_margin = `margin$household_margin`)
+
+```
+
+## reading in income level by ethnicity
+```{r message=FALSE, warning=FALSE}
+ethnicity <- read_excel("ACSST1Y2019.S1903-2020-11-25T211057.xlsx", skip=11)
+ethnicity <- ethnicity[, c(1, 6, 7)]
+
+ethnicity <- ethnicity %>%
+  rename(median_income_ethnicity = `Estimate...6`,
+         margin_income_ethnicity = `Margin of Error...7`)
+
+ethnicity$Label <- gsub("(^[[:space:]]+|[[:space:]]+$)", "", ethnicity$Label)
+ethnicity$margin_income_ethnicity <- gsub("±", "",
+                                          ethnicity$margin_income_ethnicity)
+ethnicity$median_income_ethnicity <- gsub(',', "",
+                                          ethnicity$median_income_ethnicity)
+ethnicity$margin_income_ethnicity <- gsub(',', "",
+                                          ethnicity$margin_income_ethnicity)
+
+ethnicity$median_income_ethnicity <- as.numeric(ethnicity$median_income_ethnicity)
+ethnicity$margin_income_ethnicity <- as.numeric(ethnicity$margin_income_ethnicity)
+
+ethnicity <- ethnicity[4:12, ]
+
+
+# replace names
+ethnicity$Label <- gsub("Black or African American",
+                        "Black/African American",
+                        ethnicity$Label)
+ethnicity$Label <- gsub("American Indian and Alaska Native",
+                        "American Indian or Alaskan Native",
+                        ethnicity$Label)
+ethnicity$Label <- gsub("Asian",
+                        "Asian/Pacific Islander",
+                        ethnicity$Label)
+ethnicity$Label <- gsub("Some other race",
+                        "Other or Unknown",
+                        ethnicity$Label)
+ethnicity$Label <- gsub("Hispanic or Latino origin (of any race)",
+                        "Hispanic or Latino",
+                        ethnicity$Label,
+                        fixed=TRUE)
+```
+
+
+
+## income limit function
+With clearer definition of how the income limit should be set, I thought we could leverage the linear model funtion and find out the exact limit for each tract's household. (eg, avg 1.7 people per household, then the monthly income limit is roughly 2186)
+```{r message=FALSE, warning=FALSE}
+limit <- c(1755, 2371, 2987, 3603, 4219, 4835, 5451, 6067)
+ppl <- c(1, 2 ,3, 4, 5, 6, 7, 8)
+
+income <- data.frame(ppl, limit)
+
+# ggplot(income, aes(x=ppl, y=limit))+geom_point()
+
+summary(lm(limit~ppl))
+
+# income limit function: limit= 1139 + 616 * ppl
+```
+
+
+
+## Joining datasets for 2016
+```{r}
+df <- snap %>%
+  full_join(census, by = c('tract' = 'GEOID10'), suffix = c('snap', 'census'))
+df <- df %>%
+  full_join(ffiec, by = c('NAME10' = 'Tract Code'), suffix = c('df', 'ffiec'))
+
+df_2016 <- df %>%
+  filter(elig_month > '2015-12-31', elig_month < '2017-01-01')
+df_2016 <- df_2016 %>%
+  filter(`Tract Income Level` != 'Unknown')
+
+df_2016 <- df_2016 %>%
+  select('elig_month', 'tract', 'NAME10', 'race_ethnicity', 'people', 'ALAND10',
+         'TRACT', 'POP_TOTAL', 'POP1_WHT', 'POP1_BLK',
+         'POP1_AMIND', 'POP1_ASN', 'POP1_HAWPA',  'POP1_OTHR', 
+         'POP_HSPLAT', 'Tract Income Level',
+         '2016 Est. Tract Median Family Income', 'Tract Population') %>%
+  rename('median_income_ffiec' = '2016 Est. Tract Median Family Income',
+         'pop_ffiec' = 'Tract Population')
+
+
+df_2016 <- df_2016 %>%
+  left_join(tract, by=c('NAME10' = 'tract_name'))
+df_2016 <- df_2016 %>%
+  left_join(ethnicity, by=c('race_ethnicity' = 'Label'))
+
+
+df_2016['ppl_per_household'] <- (df_2016['pop_ffiec'] / df_2016['household_size'])
+df_2016['monthly_income_limit'] <- 1139 + 616 * df_2016['ppl_per_household']
+df_2016['annual_income_limit'] <- df_2016['monthly_income_limit'] * 12
+
+
+
+```
+
+
+## Joining datasets for 2017
+```{r}
+
+ffiec <- read_excel('2017 FFIEC Summary Census Demographic Information.xlsx')
+df <- snap %>%
+  full_join(census, by = c('tract' = 'GEOID10'), suffix = c('snap', 'census'))
+df <- df %>%
+  full_join(ffiec, by = c('NAME10' = 'Tract Code'), suffix = c('df', 'ffiec'))
+
+df_2017 <- df %>%
+  filter(elig_month > '2016-12-31', elig_month < '2018-01-01')
+df_2017 <- df_2017 %>%
+  filter(`Tract Income Level` != 'Unknown')
+
+df_2017 <- df_2017 %>%
+  select('elig_month', 'tract', 'NAME10', 'race_ethnicity', 'people', 'ALAND10',
+         'TRACT', 'POP_TOTAL', 'POP1_WHT', 'POP1_BLK',
+         'POP1_AMIND', 'POP1_ASN', 'POP1_HAWPA',  'POP1_OTHR', 
+         'POP_HSPLAT', 'Tract Income Level',
+         '2017 Est. Tract Median Family Income', 'Tract Population') %>%
+  rename('median_income_ffiec' = '2017 Est. Tract Median Family Income',
+         'pop_ffiec' = 'Tract Population')
+
+
+df_2017 <- df_2017 %>%
+  left_join(tract, by=c('NAME10' = 'tract_name'))
+df_2017 <- df_2017 %>%
+  left_join(ethnicity, by=c('race_ethnicity' = 'Label'))
+
+
+df_2017['ppl_per_household'] <- (df_2017['pop_ffiec'] / df_2017['household_size'])
+df_2017['monthly_income_limit'] <- 1139 + 616 * df_2017['ppl_per_household']
+df_2017['annual_income_limit'] <- df_2017['monthly_income_limit'] * 12
+
+
+
+```
+
+
+
+## Joining datasets for 2018
+```{r}
+ffiec <- read_excel('2018 FFIEC Summary Census Demographic Information.xlsx')
+df <- snap %>%
+  full_join(census, by = c('tract' = 'GEOID10'), suffix = c('snap', 'census'))
+df <- df %>%
+  full_join(ffiec, by = c('NAME10' = 'Tract Code'), suffix = c('df', 'ffiec'))
+
+df_2018 <- df %>%
+  filter(elig_month > '2017-12-31', elig_month < '2019-01-01')
+df_2018 <- df_2018 %>%
+  filter(`Tract Income Level` != 'Unknown')
+
+df_2018 <- df_2018 %>%
+  select('elig_month', 'tract', 'NAME10', 'race_ethnicity', 'people', 'ALAND10',
+         'TRACT', 'POP_TOTAL', 'POP1_WHT', 'POP1_BLK',
+         'POP1_AMIND', 'POP1_ASN', 'POP1_HAWPA',  'POP1_OTHR', 
+         'POP_HSPLAT', 'Tract Income Level',
+         '2018 Est. Tract Median Family Income', 'Tract Population') %>%
+  rename('median_income_ffiec' = '2018 Est. Tract Median Family Income',
+         'pop_ffiec' = 'Tract Population')
+
+
+df_2018 <- df_2018 %>%
+  left_join(tract, by=c('NAME10' = 'tract_name'))
+df_2018 <- df_2018 %>%
+  left_join(ethnicity, by=c('race_ethnicity' = 'Label'))
+
+
+df_2018['ppl_per_household'] <- (df_2018['pop_ffiec'] / df_2018['household_size'])
+df_2018['monthly_income_limit'] <- 1139 + 616 * df_2018['ppl_per_household']
+df_2018['annual_income_limit'] <- df_2018['monthly_income_limit'] * 12
+
+
+
+```
+
+
+
+
+## Joining datasets for 2019
+```{r}
+ffiec <- read_excel('2019 FFIEC Summary Census Demographic Information.xlsx')
+df <- snap %>%
+  full_join(census, by = c('tract' = 'GEOID10'), suffix = c('snap', 'census'))
+df <- df %>%
+  full_join(ffiec, by = c('NAME10' = 'Tract Code'), suffix = c('df', 'ffiec'))
+
+df_2019 <- df %>%
+  filter(elig_month > '2018-12-31', elig_month < '2020-01-01')
+df_2019 <- df_2019 %>%
+  filter(`Tract Income Level` != 'Unknown')
+
+df_2019 <- df_2019 %>%
+  select('elig_month', 'tract', 'NAME10', 'race_ethnicity', 'people', 'ALAND10',
+         'TRACT', 'POP_TOTAL', 'POP1_WHT', 'POP1_BLK',
+         'POP1_AMIND', 'POP1_ASN', 'POP1_HAWPA',  'POP1_OTHR', 
+         'POP_HSPLAT', 'Tract Income Level',
+         '2019 Est. Tract Median Family Income', 'Tract Population') %>%
+  rename('median_income_ffiec' = '2019 Est. Tract Median Family Income',
+         'pop_ffiec' = 'Tract Population')
+
+
+df_2019<- df_2019 %>%
+  left_join(tract, by=c('NAME10' = 'tract_name'))
+df_2019 <- df_2019 %>%
+  left_join(ethnicity, by=c('race_ethnicity' = 'Label'))
+
+
+df_2019['ppl_per_household'] <- (df_2019['pop_ffiec'] / df_2019['household_size'])
+df_2019['monthly_income_limit'] <- 1139 + 616 * df_2019['ppl_per_household']
+df_2019['annual_income_limit'] <- df_2019['monthly_income_limit'] * 12
+
+
+
+```
+
+
+```{r}
+df <- rbind(df_2016, df_2017, df_2018, df_2019)
+```
+
+
+
+
+
+
+
+-------------------------------------------------
+# Method 3
+## Using county-level income per ethnicity to estimate how many people are under respective income limit
+With income per ethnicity for Hennepin county (found at US census bureau), I tried to re-do the calculation based on "different ethnicity has different income level". That is, assuming people's income is determined by ethnicity, not by tract. (Method 2 was determined by tract - every ethnicity in that tract got the same income level).
+But it seems that this is still not the best calculation method, although it does seem more reasonable than Method 2. The max snap penetration rate is still larger than 1 (1.5 for now), but most of them are already lower than 1.
+```{r}
+
+pop_perc_by_ethnicity_income <- c()
+
+for (i in 1:nrow(df)){
+  
+  income <- as.numeric(df[i,'median_income_ethnicity'])
+  limit <- as.numeric(df[i,'monthly_income_limit'])
+  error <- as.numeric(df[i,'margin_income_ethnicity'])
+  
+  perc_single <- plnorm(limit, meanlog = log(income),
+                        sdlog = sqrt(log((error*error/income)^2 + 1)))
+  # print(perc_single)
+  pop_perc_by_ethnicity_income = c(pop_perc_by_ethnicity_income, perc_single)
+  
+}
+
+df <- df %>%
+  cbind(pop_perc_by_ethnicity_income)
+
+df['pop_limit_by_ethnicity_income'] <- round(df['pop_ffiec'] *
+                                     df['pop_perc_by_ethnicity_income'],0)
+df['snap_perc_by_ethnicity_income'] <- round(df['people'] /
+                                    df['pop_limit_by_ethnicity_income']*100,2)
+
+df['snap_perc_by_ethnicity_income'] <- (df['snap_perc_by_ethnicity_income'] / 
+                                          df['ppl_per_household'])
+
+
+```
+
+
+
+-------------------------------------------------
+# Method 4 (CURRENT FINAL VERSION)
+## Adjust tract income based on ethnicity income ratio
+I think I finally sorted my mind out, but it's still not the answer I was looking for...
+The idea is to use a ratio, based on ethnicity. `ethnicity_avg` is the average of 6 ethnicities (that appeared in the snap dataset). Then, ethnicity income / average income for all ethnicity would give me a ratio (like white people are earning 90321 / 63151.33 = 1.43 more than average). Then, for each tract, use their tract income to multiply its ratio. Thus give me an adjusted income.
+Then still apply it to previous ideas of calculating "how many people are under its respective income limit". Max value is still 1.5...
+
+```{r}
+# calculate average for all ethnicity
+ethnicity_avg <- ethnicity %>%
+  filter((Label == 'White') | (Label == 'Black/African American') | 
+           (Label == 'American Indian or Alaskan Native') |
+           (Label == 'Asian/Pacific Islander') | 
+           (Label == 'Other or Unknown') | (Label == 'Hispanic or Latino')) %>%
+  summarize(avg = mean(median_income_ethnicity),
+            std = sd(margin_income_ethnicity))
+
+df <- cbind(df, ethnicity_avg)
+df['adjusted_income'] <- (df['median_income_ffiec'] * 
+                                 df['median_income_ethnicity'] / 
+                                 df['avg'])
+
+pop_perc_by_adjusted_income <- c()
+
+for (i in 1:nrow(df)){
+  
+  income <- as.numeric(df[i,'adjusted_income'])
+  limit <- as.numeric(df[i,'monthly_income_limit'])
+  error <- as.numeric(df[i,'margin_income_ethnicity'])
+  
+  perc_single <- plnorm(limit, meanlog = log(income),
+                        sdlog = sqrt(log((error*error/income)^2 + 1)))
+  # print(perc_single)
+  pop_perc_by_adjusted_income = c(pop_perc_by_adjusted_income, perc_single)
+  
+}
+
+df <- df %>%
+  cbind(pop_perc_by_adjusted_income)
+
+df['pop_limit_by_adjusted_income'] <- round(df['pop_ffiec'] *
+                                     df['pop_perc_by_adjusted_income'],0)
+df['snap_perc_by_adjusted_income'] <- round(df['people'] /
+                                    df['pop_limit_by_adjusted_income'] * 100,2)
+df['snap_perc_by_adjusted_income'] <- (df['snap_perc_by_adjusted_income'] / 
+                                          df['ppl_per_household'])
+
+
+```
+
+
+
+```{r}
+write_csv(df, "D:/UMN/06_6130 Introduction to Business Analytics in R/Hennepin County Live Case/snap_analysis.csv")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
